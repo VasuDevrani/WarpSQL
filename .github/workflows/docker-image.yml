@@ -23,20 +23,18 @@ env:
   TS_VERSION: ${{inputs.ts_version}}
   PRE_RELEASE: "true" # prevents the latest tag from being pushed.
 jobs:
-  build-images:
-    name: Build Images
+
+  # Build multi-arch TimescaleDB images for both TSL and OSS code.
+  postgres:
+
+    name: PG${{ matrix.pg }}${{ matrix.oss }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 4  # Increased parallelization
       matrix:
-        pg: [13, 14, 15, 16]
-        type: ['alpine', 'bitnami']
+        pg: [14, 15, 16]
         oss: [ "", "-oss" ]
-        exclude:
-          - type: 'bitnami'
-            oss: '-oss'
-          - pg: 16
-            type: 'bitnami'
     steps:
       - uses: actions/checkout@v3
         with:
@@ -54,7 +52,10 @@ jobs:
       - name: Available platforms
         run: echo ${{ steps.buildx.outputs.platforms }}
 
-      - name: Cache Docker layers
+      - name: Login to DockerHub Registry
+        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USER }} --password-stdin
+
+      - name: Cache Docker layers  # Added caching step
         uses: actions/cache@v2
         with:
           path: /tmp/.buildx-cache
@@ -62,22 +63,50 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
+      - name: Build and push multi-platform Docker image for postgres
+        run: |
+            if [ "${{inputs.tag_latest}}" == "true" ]; then
+              export PRE_RELEASE=''
+            fi
+            make multi${{ matrix.oss }} ORG="$ORG" PG_VER="pg${{ matrix.pg }}" \
+            ${TS_VERSION:+TS_VERSION="$TS_VERSION"}  PREV_EXTRA="${{ matrix.oss }}" PRE_RELEASE="$PRE_RELEASE"
+        env:
+          DOCKER_BUILDKIT: 1  # Enabling BuildKit for more efficient builds
+
+  # Build bitnami images of TimscaleDB.
+  # The images are built only for amd64, since it is the only supported architecture in the base image bitname/postgresql.
+  # The images are only built for TSL code.
+  timescaledb-bitnami:
+
+    name: PG${{ matrix.pg }}-bitnami
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15]
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+            ref: ${{inputs.version}}
+
       - name: Login to DockerHub Registry
         run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USER }} --password-stdin
 
-      - name: Build and push Docker images
+      - name: Cache Docker layers  # Added caching step
+        uses: actions/cache@v2
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build and push amd64 Docker image for TimescaleDB bitnami
         run: |
           if [ "${{inputs.tag_latest}}" == "true" ]; then
             export PRE_RELEASE=''
           fi
-          if [ "${{ matrix.type }}" == "alpine" ]; then
-            make multi${{ matrix.oss }} ORG="$ORG" PG_VER="pg${{ matrix.pg }}" \
-            ${TS_VERSION:+TS_VERSION="$TS_VERSION"} PREV_EXTRA="${{ matrix.oss }}" PRE_RELEASE="$PRE_RELEASE"
-          else
-            cd bitnami
-            make push ORG="$ORG" PG_VER="pg${{ matrix.pg }}" ${TS_VERSION:+TS_VERSION="$TS_VERSION"} PRE_RELEASE="$PRE_RELEASE"
-          fi
+          make push ORG="$ORG" PG_VER="pg${{ matrix.pg }}" ${TS_VERSION:+TS_VERSION="$TS_VERSION"}  PRE_RELEASE="$PRE_RELEASE"
+        working-directory: bitnami
         env:
-          DOCKER_BUILDKIT: 1
-          BUILDKIT_INLINE_CACHE: 1
-        working-directory: ${{ matrix.type == 'alpine' && '.' || 'bitnami' }}
+          DOCKER_BUILDKIT: 1  # Enabling BuildKit for more efficient builds
